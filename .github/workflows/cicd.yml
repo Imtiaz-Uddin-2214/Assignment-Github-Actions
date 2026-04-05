@@ -1,0 +1,109 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # JOB 1: TEST
+  # Runs on GitHub cloud machine (ubuntu-latest)
+  # ─────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests and save results
+        run: |
+          echo "================================"  | tee test-results.txt
+          echo " Date   : $(date)"                 | tee -a test-results.txt
+          echo " Commit : ${{ github.sha }}"        | tee -a test-results.txt
+          echo " Branch : ${{ github.ref_name }}"   | tee -a test-results.txt
+          echo " Actor  : ${{ github.actor }}"      | tee -a test-results.txt
+          echo "================================"  | tee -a test-results.txt
+          echo ""                                   | tee -a test-results.txt
+          set +e
+          npm run check 2>&1 | tee -a test-results.txt
+          CODE=${PIPESTATUS[0]}
+          set -e
+          echo ""                                   | tee -a test-results.txt
+          if [ "$CODE" -eq 0 ]; then
+            echo " RESULT: PASSED"                 | tee -a test-results.txt
+          else
+            echo " RESULT: FAILED"                 | tee -a test-results.txt
+          fi
+          echo "================================"  | tee -a test-results.txt
+          exit $CODE
+
+      - name: Upload test results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.txt
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # JOB 2: DEPLOY
+  # Runs directly ON your EC2 self-hosted runner
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    runs-on: self-hosted
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download test results artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results
+          path: ./artifacts
+
+      - name: Display test results
+        run: |
+          echo "===== Test Results ====="
+          cat ./artifacts/test-results.txt
+          echo "========================"
+
+      - name: Install dependencies
+        run: npm install --omit=dev
+
+      - name: Stop existing app
+        run: pm2 delete node-app 2>/dev/null || true
+
+      - name: Start app with PM2
+        run: pm2 start ./src/server.js --name node-app
+
+      - name: Save PM2 process list
+        run: pm2 save
+
+      - name: Show PM2 status
+        run: pm2 list
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -sf http://localhost:3000     && echo "OK: / is working"   || echo "FAIL: / not responding"
+          curl -sf http://localhost:3000/api && echo "OK: /api is working" || echo "FAIL: /api not responding"
